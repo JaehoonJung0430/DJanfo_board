@@ -1,12 +1,13 @@
-from django.shortcuts import render, redirect, HttpResponse
+from django.shortcuts import render, redirect, HttpResponse, get_object_or_404
 from django.views.decorators.csrf import csrf_exempt
 from django.utils import timezone
+from .models import Post
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status
+from .serializers import PostSerializer
 
-nextId = 1
-topics = []
-
-def HTMLTemplate(articleTag, id=None):
-    global topics
+def HTMLTemplate(articleTag, id=None, posts=None):
     contextUI = ''
     if id is not None:
         contextUI = f'''
@@ -19,17 +20,16 @@ def HTMLTemplate(articleTag, id=None):
             </li>
             <li><a class="button" href='/update/{id}'>수정</a></li>
         '''
-    
-    sorted_topics = sorted(topics, key=lambda x: x['created_at'], reverse=True)
-    
+
     ol = ''
-    for topic in sorted_topics:
-        ol += f'''
-            <div class="post-box">
-                <h3><a href="/read/{topic["id"]}">{topic["title"]}</a></h3>
-                <p>{topic["body"][:50]}...</p>
-            </div>
-        '''
+    if posts is not None:
+        for post in posts:
+            ol += f'''
+                <div class="post-box">
+                    <h3><a href="/read/{post.id}">{post.title}</a></h3>
+                    <p>{post.body[:50]}...</p>
+                </div>
+            '''
     
     return f'''
     <html>
@@ -137,24 +137,21 @@ def HTMLTemplate(articleTag, id=None):
     '''
 
 def index(request):
+    posts = Post.objects.all().order_by('-created_at')
     article = '<h2>글 목록</h2>'
-    return HttpResponse(HTMLTemplate(article))
+    return HttpResponse(HTMLTemplate(article, posts=posts))
 
 def read(request, id):
-    global topics
-    article = ''
-    for topic in topics:
-        if topic['id'] == int(id):
-            article = f'''
-                <div class="article-title">{topic["title"]}</div>
-                <div class="time-info">작성 시간: {topic["created_at"]} | 수정 시간: {topic["updated_at"]}</div>
-                <div class="article-body">{topic["body"]}</div>
-            '''
-    return HttpResponse(HTMLTemplate(article, id))
+    post = get_object_or_404(Post, pk=id)
+    article = f'''
+        <div class="article-title">{post.title}</div>
+        <div class="time-info">작성 시간: {post.created_at} | 수정 시간: {post.updated_at}</div>
+        <div class="article-body">{post.body}</div>
+    '''
+    return HttpResponse(HTMLTemplate(article, id=post.id))
 
 @csrf_exempt
 def create(request):
-    global nextId
     if request.method == 'GET':
         article = '''
             <h2>글 작성</h2>
@@ -174,42 +171,20 @@ def create(request):
     elif request.method == 'POST':
         title = request.POST['title']
         body = request.POST['body']
-        newTopic = {
-            "id": nextId,
-            "title": title,
-            "body": body,
-            "created_at": timezone.now(),
-            "updated_at": timezone.now()
-        }
-        topics.append(newTopic)
-        nextId += 1
-        return redirect('/')
-
-@csrf_exempt
-def delete(request):
-    global topics
-    if request.method == 'POST':
-        id = request.POST['id']
-        topics[:] = [topic for topic in topics if topic['id'] != int(id)]
+        Post.objects.create(title=title, body=body)
         return redirect('/')
 
 @csrf_exempt
 def update(request, id):
-    global topics
+    post = get_object_or_404(Post, pk=id)
     if request.method == 'GET':
-        for topic in topics:
-            if topic['id'] == int(id):
-                selectedTopic = {
-                    "title": topic['title'],
-                    "body": topic['body']
-                }
         article = f'''
             <h2>글 수정</h2>
             <div class="form-title">제목</div>
             <form action="/update/{id}/" method="post">
-                <p><input type="text" name="title" value="{selectedTopic["title"]}" required></p>
+                <p><input type="text" name="title" value="{post.title}" required></p>
                 <div class="form-body">
-                    <textarea name="body" required>{selectedTopic['body']}</textarea>
+                    <textarea name="body" required>{post.body}</textarea>
                 </div>
                 <p>
                     <input type="submit" value="수정 완료" class="button">
@@ -217,13 +192,62 @@ def update(request, id):
                 </p>
             </form>
         '''
-        return HttpResponse(HTMLTemplate(article, id))
+        return HttpResponse(HTMLTemplate(article, id=post.id))
     elif request.method == 'POST':
-        title = request.POST['title']
-        body = request.POST['body']
-        for topic in topics:
-            if topic['id'] == int(id):
-                topic['title'] = title
-                topic['body'] = body
-                topic['updated_at'] = timezone.now()
+        post.title = request.POST['title']
+        post.body = request.POST['body']
+        post.updated_at = timezone.now()
+        post.save()
         return redirect(f'/read/{id}')
+
+@csrf_exempt
+def delete(request):
+    if request.method == 'POST':
+        post = get_object_or_404(Post, pk=request.POST['id'])
+        post.delete()
+        return redirect('/')
+
+# API Views
+class PostListCreateAPIView(APIView):
+    def get(self, request):
+        posts = Post.objects.all().order_by('-created_at')
+        serializer = PostSerializer(posts, many=True)
+        return Response(serializer.data)
+
+    def post(self, request):
+        serializer = PostSerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+class PostDetailAPIView(APIView):
+    def get_object(self, id):
+        try:
+            return Post.objects.get(id=id)
+        except Post.DoesNotExist:
+            return None
+
+    def get(self, request, id):
+        post = self.get_object(id)
+        if post is None:
+            return Response({'error': 'Post not found'}, status=status.HTTP_404_NOT_FOUND)
+        serializer = PostSerializer(post)
+        return Response(serializer.data)
+
+    def put(self, request, id):
+        post = self.get_object(id)
+        if post is None:
+            return Response({'error': 'Post not found'}, status=status.HTTP_404_NOT_FOUND)
+        serializer = PostSerializer(post, data=request.data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    def delete(self, request, id):
+        post = self.get_object(id)
+        if post is None:
+            return Response({'error': 'Post not found'}, status=status.HTTP_404_NOT_FOUND)
+        post.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
